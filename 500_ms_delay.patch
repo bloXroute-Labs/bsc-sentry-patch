@@ -1,0 +1,98 @@
+Subject: [PATCH] 500 ms delay
+---
+Index: eth/protocols/eth/broadcast.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/eth/protocols/eth/broadcast.go b/eth/protocols/eth/broadcast.go
+--- a/eth/protocols/eth/broadcast.go	(revision e22989f0db364124d241246a63ec4cc8fb023fba)
++++ b/eth/protocols/eth/broadcast.go	(date 1683708505160)
+@@ -18,6 +18,7 @@
+ 
+ import (
+ 	"math/big"
++	"time"
+ 
+ 	"github.com/ethereum/go-ethereum/common"
+ 	"github.com/ethereum/go-ethereum/common/gopool"
+@@ -61,19 +62,50 @@
+ 	}
+ }
+ 
++const (
++	txChunkChBacklog  = 50000
++	txsBroadcastDelay = 500 * time.Millisecond
++)
++
+ // broadcastTransactions is a write loop that schedules transaction broadcasts
+ // to the remote peer. The goal is to have an async writer that does not lock up
+ // node internals and at the same time rate limits queued data.
+ func (p *Peer) broadcastTransactions() {
+ 	var (
+ 		queue  []common.Hash         // Queue of hashes to broadcast as full transactions
+-		done   chan struct{}         // Non-nil if background broadcaster is running
+ 		fail   = make(chan error, 1) // Channel used to receive network error
+ 		failed bool                  // Flag whether a send failed, discard everything onward
++
++		txChunkCh = make(chan []*types.Transaction, txChunkChBacklog)
+ 	)
++
++	// works with assumption that all next txChunks must be newer than previous in queue
++	go func() {
++		timer := time.NewTimer(0)
++		defer timer.Stop()
++
++		<-timer.C
++
++		for txChunk := range txChunkCh {
++			// reset to the time till newest tx arrive time + 500 ms
++			// Note: actual delay of tx going to be 500ms + N
++			timer.Reset(time.Until(txChunk[len(txChunk)-1].Time().Add(txsBroadcastDelay)))
++
++			<-timer.C
++
++			if err := p.SendTransactions(txChunk); err != nil {
++				fail <- err
++				p.Log().Error("Failed to sent transactions", "count", len(txChunk), err)
++				return
++			}
++
++			p.Log().Trace("Sent transactions", "count", len(txChunk))
++		}
++	}()
++
+ 	for {
+ 		// If there's no in-flight broadcast running, check if a new one is needed
+-		if done == nil && len(queue) > 0 {
++		if len(queue) > 0 {
+ 			// Pile transaction until we reach our allowed network limit
+ 			var (
+ 				hashesCount uint64
+@@ -91,15 +123,7 @@
+ 
+ 			// If there's anything available to transfer, fire up an async writer
+ 			if len(txs) > 0 {
+-				done = make(chan struct{})
+-				go func() {
+-					if err := p.SendTransactions(txs); err != nil {
+-						fail <- err
+-						return
+-					}
+-					close(done)
+-					p.Log().Trace("Sent transactions", "count", len(txs))
+-				}()
++				txChunkCh <- txs
+ 			}
+ 		}
+ 		// Transfer goroutine may or may not have been started, listen for events
+@@ -116,9 +140,6 @@
+ 				queue = queue[:copy(queue, queue[len(queue)-maxQueuedTxs:])]
+ 			}
+ 
+-		case <-done:
+-			done = nil
+-
+ 		case <-fail:
+ 			failed = true
+ 

@@ -11,7 +11,7 @@ git clone https://github.com/bloXroute-Labs/bsc-sentry-patch
 
 Apply patch to your [bsc](https://github.com/bnb-chain/bsc) node source code:
 ```bash
-git apply /path/to/announce_only.patch
+git apply /path/to/500_ms_delay.patch
 ```
 
 Build geth:
